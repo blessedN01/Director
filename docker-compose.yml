@@ -1,0 +1,175 @@
+services:
+  backend:
+    image: director:latest
+    build:
+      context: ./backend 
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app/
+      - /app/venv/
+    env_file:
+      - ./backend/.env
+    environment:
+      - FLASK_APP=director.entrypoint.api.server
+      - FLASK_DEBUG=1
+    # dev command
+    command: python director/entrypoint/api/server.py
+
+  frontend:
+    image: director_frontend:latest
+    build:
+      context: ./frontend
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    env_file:
+      - ./frontend/.env
+    command: npm run dev
+
+  editmind-background-jobs:
+    restart: unless-stopped
+    image: ghcr.io/iliashad/edit-mind-background-jobs:latest
+    container_name: director-editmind-background-jobs
+    env_file:
+      - .env.editmind.system
+      - .env.editmind
+    ports:
+      - "${BACKGROUND_JOBS_PORT:-4000}:${BACKGROUND_JOBS_PORT:-4000}"
+    depends_on:
+      editmind-postgres:
+        condition: service_healthy
+      editmind-redis:
+        condition: service_healthy
+      editmind-chroma:
+        condition: service_started
+      editmind-ml:
+          condition: service_started
+    networks:
+      - app-network
+    volumes:
+      - ${HOST_MEDIA_PATH:-./backend/director/downloads}:/media/videos:rw
+      - .data:/app/data
+      - ml-models:/app/ml-models:rw
+  editmind-web:
+    restart: unless-stopped
+    image: ghcr.io/iliashad/edit-mind-web:latest
+    container_name: director-editmind-web
+    env_file:
+      - .env.editmind.system
+      - .env.editmind
+    ports:
+      - "${PORT:-3745}:${PORT:-3745}"
+    depends_on:
+      editmind-postgres:
+        condition: service_healthy
+      editmind-chroma:
+        condition: service_started
+      editmind-redis:
+        condition: service_healthy
+    volumes:
+      - ${HOST_MEDIA_PATH:-./backend/director/downloads}:/media/videos:ro
+      - .data:/app/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3745"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  editmind-chroma:
+    image: chromadb/chroma:1.3.5
+    container_name: director-editmind-chroma
+    restart: unless-stopped
+    env_file:
+      - .env.editmind.system
+      - .env.editmind
+    environment:
+      IS_PERSISTENT: TRUE
+      CHROMA_CORS_ALLOW_ORIGINS: '["http://localhost:3745", "http://localhost:4000", "http://editmind-web:3745", "http://editmind-background-jobs:4000"]'
+    ports:
+      - "${CHROMA_PORT:-8000}:8000"
+    volumes:
+      - chroma_data:/data
+    networks:
+      - app-network
+
+  editmind-redis:
+    restart: unless-stopped
+    image: redis:7
+    container_name: director-editmind-redis
+    env_file:
+      - .env.editmind.system
+      - .env.editmind
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  editmind-postgres:
+    image: postgres:16-alpine
+    container_name: director-editmind-postgres
+    restart: unless-stopped
+    env_file:
+      - .env.editmind.system
+      - .env.editmind
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - app-network
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"
+
+  editmind-ml:
+    restart: unless-stopped
+    image: ghcr.io/iliashad/edit-mind-ml:latest
+    container_name: director-editmind-ml
+    env_file:
+      - .env.editmind.system
+      - .env.editmind
+    ports:
+      - "${ML_PORT:-8765}:${ML_PORT:-8765}"
+    environment:
+      YOLO_CONFIG_DIR: /ml-models/ultralytics
+      DEEPFACE_HOME: /ml-models/deepface
+      TRANSCRIPTION_MODEL_CACHE: /ml-models/whisper
+      TORCH_HOME: /ml-models/torch  
+      HF_HOME: /ml-models/huggingface  
+    networks:
+      - app-network
+    volumes:
+      - ${HOST_MEDIA_PATH:-./backend/director/downloads}:/media/videos:ro
+      - ml-models:/ml-models:rw
+      - .data:/app/data
+
+volumes:
+  redis_data:
+    driver: local
+  ml-models:
+    driver: local
+  chroma_data:
+    driver: local
+  pg_data:
+    driver: local
+
+networks:
+  app-network:
+    driver: bridge
